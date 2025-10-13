@@ -1,0 +1,168 @@
+
+% Windows to extract before / after trigger onset
+
+pre = 0.1; 
+post = 0.5;   
+tmin = -pre;
+tmax = post;
+
+% baseline window (seconds) relative to stimulus onset
+basewin = [-0.1 0];
+
+% trigger values
+freq_val = 1.0;   
+infreq_val = 0.5;
+
+% MMN and P300 windows (seconds)
+mmn_window = [0.10 0.25]; 
+p3_window = [0.25 0.50];
+
+% number of top electrodes to average 
+Ntop = 5;
+
+
+function [epochs, times, trial_types] = epoch_from_trigger_matrix(matdata, trigChan, fval, dval, fs, tmin, tmax)
+    trig = matdata(trigChan, :);
+    eeg  = matdata;
+    eeg(trigChan, :) = [];
+    
+    % Find indices for frequent and deviant triggers
+    
+    idx_f = find(trig == fval);
+    idx_d = find(trig == dval);
+    
+    % Combine and sort chronologically
+    onsets = [idx_f(:); idx_d(:)];
+    labels  = [ones(numel(idx_f),1)*fval; ones(numel(idx_d),1)*dval];
+    [onsets, ord] = sort(onsets);
+    labels = labels(ord);
+
+    % sort onsets chronologically
+    [onsets,ord] = sort(onsets);
+    labels = labels(ord);
+    pre = round(tmin * fs);
+    post = round(tmax * fs);
+    win = pre:post;
+    epoch_len = numel(win);
+    nchans = size(eeg,1);
+    ntr = numel(onsets);
+    epochs = nan(nchans, epoch_len, ntr);
+    trial_types = labels;
+    for k = 1:ntr
+        idx = onsets(k) + win;
+        % skip epochs that go out of bounds
+        if idx(1) < 1 || idx(end) > size(eeg,2)
+            continue;
+        end
+        epochs(:,:,k) = eeg(:, idx);
+    end
+    % remove any all-nan trials
+    good = squeeze(~all(all(isnan(epochs),1),2));
+    epochs = epochs(:,:,good);
+    trial_types = trial_types(good);
+    times = win / fs;
+end
+
+
+x = load(fn_without);
+mat_wo = x.y;
+y = load(fn_with);
+mat_w = y.y;
+
+trig_wo = 2;
+trig_w  = 2;
+
+exclude_ch = [3 6 7];
+good_idx = setdiff(1:size(mat_wo,1), exclude_ch);
+mat_wo = mat_wo(good_idx, :); 
+
+good_idx2 = setdiff(1:size(mat_w,1), exclude_ch);
+mat_w = mat_w(good_idx2, :);
+
+% store trig channel before filtering (messes it up)
+trig_chan_wo = mat_wo(2, :);
+trig_chan_w = mat_w(2,:);
+
+% highpass filt
+hp_cutoff = 0.5;
+[b,a] = butter(2, hp_cutoff/(fs/2), 'high');
+
+mat_w_filt  = filtfilt(b, a, mat_w')'; 
+mat_wo_filt = filtfilt(b, a, mat_wo')';
+
+mat_w_filt(2, :)= trig_chan_w;
+mat_wo_filt(2,:) = trig_chan_wo;
+
+% Then use filtered matrices for epoching
+[epochs_wo, times, types_wo] = epoch_from_trigger_matrix(mat_wo_filt, trig_wo, freq_val, infreq_val, fs, tmin, tmax);
+[epochs_w,  ~, types_w]  = epoch_from_trigger_matrix(mat_w_filt,  trig_w,  freq_val, infreq_val, fs, tmin, tmax);
+baseline_idx = times >= -0.1 & times <= 0;  % pre-stimulus window
+
+% channel labels (simple)
+nch = size(epochs_wo,1);
+chan_labels = arrayfun(@(k) sprintf('Ch%d', k), 1:nch, 'uni', false);
+
+% baseline correction per epoch (subtract mean over basewin)
+[~, ib1] = min(abs(times - basewin(1)));
+[~, ib2] = min(abs(times - basewin(2)));
+for tr = 1:size(epochs_wo,3)
+    base = mean(epochs_wo(:, ib1:ib2, tr), 2);
+    epochs_wo(:,:,tr) = epochs_wo(:,:,tr) - base;
+end
+for tr = 1:size(epochs_w,3)
+    base = mean(epochs_w(:, ib1:ib2, tr), 2);
+    epochs_w(:,:,tr) = epochs_w(:,:,tr) - base;
+end
+
+%% compute ERPs
+% indices for freq and oddball
+idx_f_wo = find(abs(types_wo - freq_val) < 1e-3);
+idx_d_wo = find(abs(types_wo - infreq_val) < 1e-3);
+idx_f_w  = find(abs(types_w  - freq_val) < 1e-3);
+idx_d_w  = find(abs(types_w  - infreq_val) < 1e-3);
+
+ERP.wo.freq = squeeze(mean(epochs_wo(:,:,idx_f_wo), 3));
+ERP.wo.devi = squeeze(mean(epochs_wo(:,:,idx_d_wo), 3));
+ERP.w.freq  = squeeze(mean(epochs_w(:,:,idx_f_w),  3));
+ERP.w.devi  = squeeze(mean(epochs_w(:,:,idx_d_w),  3));
+
+%% Plot average ERP responses for frequent and oddball tones all electrodes 
+figure('Name','All electrodes: with and without attention','Units','normalized','Position',[.05 .05 .9 .85]);
+ncols = 4;
+nrows = ceil(nch / ncols);
+for ch = 2:nch
+    ax = subplot(nrows,ncols,ch);
+    plot(times, ERP.w.freq(ch,:),  'g','LineWidth',1); hold on;
+    plot(times, ERP.w.devi(ch,:),  'r','LineWidth',1);
+    plot(times, ERP.wo.freq(ch,:),'g--','LineWidth',1);
+    plot(times, ERP.wo.devi(ch,:),'r--','LineWidth',1);
+    title(chan_labels{ch}, 'Interpreter','none');
+    if ch==1
+        legend({'With: frequent','With: deviant','Without: frequent','Without: deviant'}, 'Location','best');
+    end
+    xlim([times(1) times(end)]);
+    xlabel('Time (s)');
+end
+sgtitle('ERP by electrode: solid = with attention, dashed = without attention');
+
+
+top_chans = [5 6 7 11 13];
+N = size(top_chans);
+
+%% plot avg ERP averaged over trials
+avg_w_freq = mean(ERP.w.freq(top_chans, :), 1);
+avg_w_devi = mean(ERP.w.devi(top_chans, :), 1);
+avg_wo_freq = mean(ERP.wo.freq(top_chans, :), 1);
+avg_wo_devi = mean(ERP.wo.devi(top_chans, :), 1);
+
+figure('Name','Average over strongest electrodes','Units','normalized','Position',[0.1 0.1 .7 .5]);
+plot(times, avg_w_freq, 'g','LineWidth',2); hold on;
+plot(times, avg_w_devi, 'r','LineWidth',2);
+plot(times, avg_wo_freq, 'g--','LineWidth',2);
+plot(times, avg_wo_devi, 'r--','LineWidth',2);
+xlabel('Time (s)');
+ylabel('Amplitude (uV)');
+legend({'With: frequent','With: deviant','Without: frequent','Without: deviant'});
+title(sprintf('Average ERP over top electrodes'));
+xlim([times(1) times(end)]);
+grid on;
